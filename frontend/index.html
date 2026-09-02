@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>POPOPHONE · Store Management</title>
+  <link rel="stylesheet" href="./styles.css"/>
+</head>
+<body>
+  <div id="app">
+    <section id="loginView" class="login-page">
+      <div class="login-card">
+        <div class="brand">POPOPHONE</div>
+        <h1>STORE MANAGEMENT</h1>
+        <p>Đăng nhập theo quyền được cấp.</p>
+        <label>Tài khoản</label>
+        <input id="loginUsername" autocomplete="username" placeholder="VD: ql.tdm"/>
+        <label>Mật khẩu</label>
+        <input id="loginPassword" type="password" autocomplete="current-password"/>
+        <button id="loginBtn" class="primary full">Đăng nhập</button>
+        <div id="loginError" class="error hidden"></div>
+      </div>
+    </section>
+
+    <section id="mainView" class="hidden">
+      <header>
+        <div>
+          <h1>POPOPHONE · STORE MANAGEMENT</h1>
+          <p id="headerSubtitle">Hệ thống điều hành cửa hàng</p>
+        </div>
+        <div class="header-right">
+          <span id="userBadge" class="user-badge"></span>
+          <button id="logoutBtn" class="header-btn">Đăng xuất</button>
+        </div>
+      </header>
+
+      <main class="wrap">
+        <div id="managerApp" class="hidden"></div>
+        <div id="ceoApp" class="hidden"></div>
+      </main>
+    </section>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="./config.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
