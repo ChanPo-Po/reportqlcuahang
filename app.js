@@ -50,6 +50,13 @@ async function loadManager(){
 
 function renderManager(r){
   const d=r.report||{};
+  // Giá trị mặc định phải tồn tại trong object, không chỉ hiển thị trên select.
+  // Nếu không, người dùng không đụng vào select thì backend sẽ tưởng là thiếu dữ liệu khi submit.
+  if (d.shift == null || d.shift === '') d.shift = 'Cả ngày';
+  if (d.cleaning_done == null || d.cleaning_done === '') d.cleaning_done = 'YES';
+  if (d.meeting_done == null || d.meeting_done === '') d.meeting_done = 'YES';
+  if (d.accessory_check == null || d.accessory_check === '') d.accessory_check = 'OK';
+  if (d.store_photos == null || d.store_photos === '') d.store_photos = 'YES';
   $('#managerApp').innerHTML=`
   <div class="toolbar">
     <div class="field"><label>NGÀY BÁO CÁO</label><input value="${esc(r.date)}" readonly></div>
@@ -114,10 +121,28 @@ function renderManagerPane(i,d){
   9:`<section class="card"><h2>10. Kế hoạch ngày mai</h2><label>3 việc ưu tiên + người làm + deadline</label><textarea data-k="tomorrow_priorities" rows="7">${esc(val(d,'tomorrow_priorities'))}</textarea><div class="grid3" style="margin-top:12px"><div><label>Target máy</label><input type="number" data-k="target_machines" value="${esc(val(d,'target_machines',0))}"></div><div><label>Target doanh thu</label><input type="number" data-k="target_revenue" value="${esc(val(d,'target_revenue',0))}"></div><div><label>Target follow</label><input type="number" data-k="target_follow" value="${esc(val(d,'target_follow',0))}"></div></div>
       <label style="margin-top:12px">Đề xuất lên CEO</label><textarea data-k="manager_proposal" rows="4">${esc(val(d,'manager_proposal'))}</textarea></section>`
  };
- p.innerHTML = fields[i] + `<div class="bottom-submit"><div><span class="muted">Lưu nháp bất kỳ lúc nào. Nộp xong CEO mới chấm/đánh giá.</span></div><div><button class="ghost" id="saveDraftBtn">Lưu nháp</button> <button class="primary" id="submitBtn">Nộp báo cáo</button></div></div>`;
+ const isSubmitted = String(d.status||'').toUpperCase()==='SUBMITTED';
+ p.innerHTML = fields[i] + `<div class="bottom-submit"><div><span class="muted">${isSubmitted?'Báo cáo đã nộp. Mọi lần lưu tiếp theo vẫn giữ trạng thái ĐÃ NỘP.':'Lưu nháp bất kỳ lúc nào. Nộp xong CEO mới chấm/đánh giá.'}</span></div><div><button type="button" class="ghost" id="saveDraftBtn">${isSubmitted?'Lưu cập nhật':'Lưu nháp'}</button> <button type="button" class="primary" id="submitBtn">${isSubmitted?'Nộp cập nhật lên CEO':'Nộp báo cáo'}</button></div></div>`;
  p.querySelectorAll('[data-k]').forEach(el=>{ const k=el.dataset.k; if(d[k]!=null && (el.tagName==='SELECT')) el.value=d[k]; el.addEventListener('change',()=>d[k]=el.value); el.addEventListener('input',()=>d[k]=el.value); });
- $('#saveDraftBtn').onclick=async()=>{try{await api('report.saveDraft',{report:d});toast('Đã lưu nháp');}catch(e){toast(e.message)}};
- $('#submitBtn').onclick=async()=>{try{await api('report.submit',{report:d});d.status='SUBMITTED';toast('Đã nộp báo cáo lên CEO');loadManager();}catch(e){toast(e.message)}};
+ $('#saveDraftBtn').onclick=async()=>{
+   try{
+     const rs=await api('report.saveDraft',{report:d});
+     d.status=rs.status||d.status||'DRAFT';
+     toast(d.status==='SUBMITTED'?'✅ Đã lưu cập nhật — báo cáo vẫn ĐÃ NỘP':'Đã lưu nháp');
+     await loadManager();
+   }catch(e){toast('❌ '+e.message)}
+ };
+ $('#submitBtn').onclick=async()=>{
+   try{
+     const rs=await api('report.submit',{report:d});
+     d.status=rs.status||'SUBMITTED';
+     toast('✅ Đã NỘP báo cáo lên CEO');
+     await loadManager();
+   }catch(e){
+     toast('❌ Chưa nộp được: '+e.message);
+     alert('CHƯA NỘP ĐƯỢC BÁO CÁO\n\n'+e.message);
+   }
+ };
 }
 
 async function loadCEO(){

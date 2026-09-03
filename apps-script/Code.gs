@@ -115,22 +115,51 @@ function hashPassword_(password,salt){
 function getTodayReport_(u) {
   const date = dateKey_(new Date());
   const rows = rowsAsObjects_(sheet_(CFG.SHEETS.REPORTS));
-  const r = rows.find(x => String(x.REPORT_DATE)===date && String(x.BRANCH)===String(u.BRANCH) && String(x.MANAGER_USER_ID)===String(u.USER_ID));
+  const r = rows.find(x => dateCellKey_(x.REPORT_DATE)===date && String(x.BRANCH).trim()===String(u.BRANCH).trim() && String(x.MANAGER_USER_ID).trim()===String(u.USER_ID).trim());
   return {date, report:r ? reportObjFromRow_(r) : {status:'DRAFT'}};
 }
-function saveReport_(u, report, status) {
+function saveReport_(u, report, requestedStatus) {
   const sh=sheet_(CFG.SHEETS.REPORTS), headers=headers_(sh), date=dateKey_(new Date());
   const rows=rowsAsObjects_(sh);
-  let existing=rows.find(x=>String(x.REPORT_DATE)===date && String(x.BRANCH)===String(u.BRANCH) && String(x.MANAGER_USER_ID)===String(u.USER_ID));
+  let existing=rows.find(x=>dateCellKey_(x.REPORT_DATE)===date && String(x.BRANCH).trim()===String(u.BRANCH).trim() && String(x.MANAGER_USER_ID).trim()===String(u.USER_ID).trim());
+
+  // QUY TẮC TRẠNG THÁI:
+  // 1) Bấm Nộp => SUBMITTED tuyệt đối.
+  // 2) Báo cáo đã SUBMITTED thì về sau bấm Lưu cũng KHÔNG được tụt lại DRAFT.
+  // Muốn mở lại bản nháp phải có route/reopen riêng do CEO/Admin thực hiện.
+  const existingStatus = String(existing ? existing.STATUS : '').trim().toUpperCase();
+  const req = String(requestedStatus || 'DRAFT').trim().toUpperCase();
+  const status = (req === 'SUBMITTED' || existingStatus === 'SUBMITTED') ? 'SUBMITTED' : 'DRAFT';
+  const now = new Date();
+
   const obj = {
     REPORT_ID: existing ? existing.REPORT_ID : id_('RPT'),
     REPORT_DATE: date, BRANCH:u.BRANCH, MANAGER_USER_ID:u.USER_ID, MANAGER_NAME:u.FULL_NAME,
-    STATUS:status, UPDATED_AT:new Date(), SUBMITTED_AT: status==='SUBMITTED' ? new Date() : (existing ? existing.SUBMITTED_AT : '')
+    STATUS:status,
+    UPDATED_AT:now,
+    SUBMITTED_AT: status==='SUBMITTED'
+      ? (existingStatus==='SUBMITTED' && existing && existing.SUBMITTED_AT ? existing.SUBMITTED_AT : now)
+      : ''
   };
+  // Chỉ nhận các field nghiệp vụ từ frontend.
+  // KHÔNG cho report.status/report_id/... ghi đè metadata do backend quyết định.
+  const RESERVED = new Set([
+    'REPORT_ID','REPORT_DATE','BRANCH','MANAGER_USER_ID','MANAGER_NAME',
+    'STATUS','UPDATED_AT','SUBMITTED_AT'
+  ]);
   headers.forEach(h=>{
+    if (RESERVED.has(h)) return;
     const k=h.toLowerCase();
     if (report[k] !== undefined) obj[h]=report[k];
   });
+
+  // Ép metadata lần cuối. Frontend không có quyền thay STATUS.
+  obj.STATUS = status;
+  obj.UPDATED_AT = now;
+  obj.SUBMITTED_AT = status==='SUBMITTED'
+    ? (existingStatus==='SUBMITTED' && existing && existing.SUBMITTED_AT ? existing.SUBMITTED_AT : now)
+    : '';
+
   validateReport_(obj,status);
   if(existing){
     const row=Number(existing.__row);
@@ -154,28 +183,127 @@ function validateReport_(o,status){
 
 /* ---------- CEO ---------- */
 function ceoDashboard_() {
-  const date=dateKey_(new Date()), reports=rowsAsObjects_(sheet_(CFG.SHEETS.REPORTS)).filter(r=>String(r.REPORT_DATE)===date);
-  const users=rowsAsObjects_(sheet_(CFG.SHEETS.USERS)).filter(u=>String(u.ROLE)==='MANAGER'&&truthy_(u.ACTIVE));
-  const evals=rowsAsObjects_(sheet_(CFG.SHEETS.EVALS)).filter(e=>String(e.REPORT_DATE)===date);
-  const branches=users.map(u=>{
-    const r=reports.find(x=>String(x.MANAGER_USER_ID)===String(u.USER_ID));
-    const revenue=Number(r?.ACTUAL_REVENUE||0), machines=Number(r?.MACHINES_SOLD||0), ct=Number(r?.CUSTOMER_INTENT||0), cb=Number(r?.CUSTOMER_BOUGHT||0);
-    return {branch:u.BRANCH,managerName:u.FULL_NAME,status:r?.STATUS||'NOT_SUBMITTED',reportId:r?.REPORT_ID||'',revenue,machines,conversion:ct?round1_(cb/ct*100):0,financePending:Number(r?.FINANCE_PENDING||0),managerProposal:r?.MANAGER_PROPOSAL||''};
+  const date = dateKey_(new Date());
+
+  // Lấy toàn bộ báo cáo và chuẩn hoá ngày + status ngay tại backend.
+  // CEO KHÔNG phụ thuộc format ô ngày trong Google Sheet (Date / yyyy-MM-dd / dd/MM/yyyy).
+  const allReports = rowsAsObjects_(sheet_(CFG.SHEETS.REPORTS));
+  const reports = allReports.filter(r => dateCellKey_(r.REPORT_DATE) === date);
+  const submitted = reports.filter(r => String(r.STATUS || '').trim().toUpperCase() === 'SUBMITTED');
+
+  const users = rowsAsObjects_(sheet_(CFG.SHEETS.USERS))
+    .filter(u => String(u.ROLE || '').trim().toUpperCase() === 'MANAGER' && truthy_(u.ACTIVE));
+
+  const evals = rowsAsObjects_(sheet_(CFG.SHEETS.EVALS))
+    .filter(e => dateCellKey_(e.REPORT_DATE) === date);
+
+  // Ghép danh sách chi nhánh từ USERS + báo cáo thực tế.
+  // Như vậy báo cáo đã SUBMITTED vẫn hiện trên CEO kể cả khi USERS có lỗi ACTIVE/branch.
+  const branchMap = new Map();
+
+  users.forEach(u => {
+    const uid = String(u.USER_ID || '').trim();
+    const r = reports.find(x => String(x.MANAGER_USER_ID || '').trim() === uid);
+    branchMap.set(uid || ('USER-' + String(u.BRANCH || '')), { user:u, report:r || null });
   });
-  const submitted=reports.filter(r=>String(r.STATUS)==='SUBMITTED');
-  const revenue=sum_(submitted,'ACTUAL_REVENUE'), target=sum_(submitted,'TARGET_REVENUE'), intent=sum_(submitted,'CUSTOMER_INTENT'), bought=sum_(submitted,'CUSTOMER_BOUGHT');
-  const issues=buildIssues_(submitted);
-  const managers=users.map(u=>{
-    const r=reports.find(x=>String(x.MANAGER_USER_ID)===String(u.USER_ID))||{};
-    const ev=evals.filter(e=>String(e.MANAGER_USER_ID)===String(u.USER_ID)).slice(-1)[0];
-    return {userId:u.USER_ID,fullName:u.FULL_NAME,branch:u.BRANCH,selfSales:Number(r.SCORE_SALES||0),selfOperation:Number(r.SCORE_OPERATION||0),selfStaff:Number(r.SCORE_STAFF||0),selfCskh:Number(r.SCORE_CSKH||0),selfRepair:Number(r.SCORE_REPAIR||0),ceoScore:ev?Number(ev.SCORE):null};
+
+  reports.forEach(r => {
+    const uid = String(r.MANAGER_USER_ID || '').trim();
+    const already = [...branchMap.values()].some(x =>
+      x.report && String(x.report.REPORT_ID || '') === String(r.REPORT_ID || '')
+    );
+    if (!already) {
+      branchMap.set(uid || ('REPORT-' + String(r.REPORT_ID || '')), {
+        user: {
+          USER_ID: r.MANAGER_USER_ID || '',
+          FULL_NAME: r.MANAGER_NAME || 'QL cửa hàng',
+          BRANCH: r.BRANCH || ''
+        },
+        report: r
+      });
+    }
   });
+
+  const branches = [...branchMap.values()].map(({user:u, report:r}) => {
+    const revenue = Number(r?.ACTUAL_REVENUE || 0);
+    const machines = Number(r?.MACHINES_SOLD || 0);
+    const ct = Number(r?.CUSTOMER_INTENT || 0);
+    const cb = Number(r?.CUSTOMER_BOUGHT || 0);
+    const status = String(r?.STATUS || 'NOT_SUBMITTED').trim().toUpperCase();
+    return {
+      branch: r?.BRANCH || u.BRANCH || '',
+      managerName: r?.MANAGER_NAME || u.FULL_NAME || '',
+      status,
+      reportId: r?.REPORT_ID || '',
+      revenue,
+      machines,
+      conversion: ct ? round1_(cb / ct * 100) : 0,
+      financePending: Number(r?.FINANCE_PENDING || 0),
+      managerProposal: r?.MANAGER_PROPOSAL || ''
+    };
+  });
+
+  const revenue = sum_(submitted, 'ACTUAL_REVENUE');
+  const target = sum_(submitted, 'TARGET_REVENUE');
+  const intent = sum_(submitted, 'CUSTOMER_INTENT');
+  const bought = sum_(submitted, 'CUSTOMER_BOUGHT');
+  const issues = buildIssues_(submitted);
+
+  const managerKeys = new Map();
+  users.forEach(u => managerKeys.set(String(u.USER_ID || '').trim(), u));
+  reports.forEach(r => {
+    const uid = String(r.MANAGER_USER_ID || '').trim();
+    if (!managerKeys.has(uid)) managerKeys.set(uid, {
+      USER_ID: uid,
+      FULL_NAME: r.MANAGER_NAME || 'QL cửa hàng',
+      BRANCH: r.BRANCH || ''
+    });
+  });
+
+  const managers = [...managerKeys.values()].map(u => {
+    const uid = String(u.USER_ID || '').trim();
+    const r = reports.find(x => String(x.MANAGER_USER_ID || '').trim() === uid) || {};
+    const ev = evals.filter(e => String(e.MANAGER_USER_ID || '').trim() === uid).slice(-1)[0];
+    return {
+      userId: u.USER_ID,
+      fullName: r.MANAGER_NAME || u.FULL_NAME,
+      branch: r.BRANCH || u.BRANCH,
+      selfSales: Number(r.SCORE_SALES || 0),
+      selfOperation: Number(r.SCORE_OPERATION || 0),
+      selfStaff: Number(r.SCORE_STAFF || 0),
+      selfCskh: Number(r.SCORE_CSKH || 0),
+      selfRepair: Number(r.SCORE_REPAIR || 0),
+      ceoScore: ev ? Number(ev.SCORE) : null
+    };
+  });
+
   return {
     date,
-    kpis:{revenue,targetRate:target?round1_(revenue/target*100):0,machines:sum_(submitted,'MACHINES_SOLD'),conversion:intent?round1_(bought/intent*100):0,cost:sum_(submitted,'DAILY_COST'),financePending:sum_(submitted,'FINANCE_PENDING'),ceoIssues:issues.filter(x=>x.requiresCEO).length,submittedManagers:submitted.length,totalManagers:users.length},
-    branches,issues,managers,tasks:listAllOpenTasks_()
+    kpis: {
+      revenue,
+      targetRate: target ? round1_(revenue / target * 100) : 0,
+      machines: sum_(submitted, 'MACHINES_SOLD'),
+      conversion: intent ? round1_(bought / intent * 100) : 0,
+      cost: sum_(submitted, 'DAILY_COST'),
+      financePending: sum_(submitted, 'FINANCE_PENDING'),
+      ceoIssues: issues.filter(x => x.requiresCEO).length,
+      submittedManagers: submitted.length,
+      totalManagers: Math.max(users.length, branches.length)
+    },
+    branches,
+    issues,
+    managers,
+    tasks: listAllOpenTasks_(),
+    debug: {
+      today: date,
+      totalReportRows: allReports.length,
+      todayReportRows: reports.length,
+      submittedRows: submitted.length,
+      reportIds: reports.map(r => String(r.REPORT_ID || ''))
+    }
   };
 }
+
 function buildIssues_(reports){
   const out=[];
   reports.forEach(r=>{
@@ -229,6 +357,23 @@ function headers_(sh){return sh.getRange(1,1,1,sh.getLastColumn()).getDisplayVal
 function rowsAsObjects_(sh){const lr=sh.getLastRow(),lc=sh.getLastColumn();if(lr<2)return[];const h=sh.getRange(1,1,1,lc).getDisplayValues()[0],v=sh.getRange(2,1,lr-1,lc).getValues();return v.map((r,i)=>{const o={__row:i+2};h.forEach((x,j)=>o[x]=r[j]);return o})}
 function reportObjFromRow_(r){const o={};Object.keys(r).forEach(k=>{if(k==='__row')return;o[k.toLowerCase()]=r[k]});o.status=r.STATUS;o.reportId=r.REPORT_ID;o.reportDate=r.REPORT_DATE;o.branch=r.BRANCH;o.managerName=r.MANAGER_NAME;return o}
 function dateKey_(d){return Utilities.formatDate(d,Session.getScriptTimeZone()||'Asia/Ho_Chi_Minh','yyyy-MM-dd')}
+function dateCellKey_(v){
+  if (v instanceof Date && !isNaN(v.getTime())) return dateKey_(v);
+  const s = String(v || '').trim();
+  if (!s) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  // Google Sheet có thể trả display dạng dd/MM/yyyy hoặc dd/MM/yyyy HH:mm:ss.
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s|$)/);
+  if (m) return m[3] + '-' + String(m[2]).padStart(2,'0') + '-' + String(m[1]).padStart(2,'0');
+
+  // Hỗ trợ dd-MM-yyyy.
+  m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})(?:\s|$)/);
+  if (m) return m[3] + '-' + String(m[2]).padStart(2,'0') + '-' + String(m[1]).padStart(2,'0');
+
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? s : dateKey_(d);
+}
 function id_(p){return p+'-'+Utilities.getUuid().split('-')[0].toUpperCase()}
 function sum_(rows,key){return rows.reduce((s,r)=>s+Number(r[key]||0),0)}
 function round1_(n){return Math.round(Number(n)*10)/10}
