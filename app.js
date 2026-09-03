@@ -1,6 +1,8 @@
 const API = window.APP_CONFIG.API_URL;
 let session = null;
 let currentReport = null;
+let ceoManagers = [];
+let ceoSelectedDate = '';
 
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
@@ -41,14 +43,33 @@ function renderByRole(){
 }
 
 async function loadManager(){
-  $('#managerApp').innerHTML='<div class="card">Đang tải báo cáo...</div>';
+  $('#managerApp').innerHTML='<div class="card">Đang tải báo cáo & công việc CEO giao...</div>';
   try{
-    currentReport=await api('report.getToday');
-    renderManager(currentReport);
+    const [reportData, taskRows] = await Promise.all([
+      api('report.getToday'),
+      api('task.listMine')
+    ]);
+    currentReport=reportData;
+    renderManager(currentReport, Array.isArray(taskRows)?taskRows:[]);
   }catch(e){$('#managerApp').innerHTML=`<div class="alert danger">${esc(e.message)}</div>`}
 }
 
-function renderManager(r){
+function normalizeTask(t){
+  return {
+    taskId: t.taskId || t.TASK_ID || '',
+    title: t.title || t.TITLE || '',
+    description: t.description || t.DESCRIPTION || '',
+    priority: t.priority || t.PRIORITY || 'MEDIUM',
+    dueDate: t.dueDate || t.DUE_DATE || '',
+    status: t.status || t.STATUS || 'TODO',
+    result: t.result || t.RESULT || '',
+    branch: t.branch || t.BRANCH || ''
+  };
+}
+function taskStatusLabel(s){return ({TODO:'CHƯA LÀM',IN_PROGRESS:'ĐANG LÀM',DONE:'ĐÃ XONG',APPROVED:'CEO ĐÃ DUYỆT'})[String(s||'').toUpperCase()]||String(s||'');}
+function taskPriorityLabel(s){return ({HIGH:'CAO',MEDIUM:'VỪA',LOW:'THẤP'})[String(s||'').toUpperCase()]||String(s||'');}
+
+function renderManager(r, taskRows=[]){
   const d=r.report||{};
   // Giá trị mặc định phải tồn tại trong object, không chỉ hiển thị trên select.
   // Nếu không, người dùng không đụng vào select thì backend sẽ tưởng là thiếu dữ liệu khi submit.
@@ -57,7 +78,36 @@ function renderManager(r){
   if (d.meeting_done == null || d.meeting_done === '') d.meeting_done = 'YES';
   if (d.accessory_check == null || d.accessory_check === '') d.accessory_check = 'OK';
   if (d.store_photos == null || d.store_photos === '') d.store_photos = 'YES';
+  const myTasks = taskRows.map(normalizeTask);
+  const openTasks = myTasks.filter(t=>!['DONE','APPROVED'].includes(String(t.status).toUpperCase()));
   $('#managerApp').innerHTML=`
+  <section class="card" style="margin-bottom:15px">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+      <div><h2 style="margin:0">📌 Việc CEO giao</h2><p class="muted" style="margin:4px 0 0">${openTasks.length} việc đang cần xử lý · ${myTasks.length} việc tổng cộng</p></div>
+      <button type="button" class="ghost" id="refreshMyTasksBtn">Làm mới công việc</button>
+    </div>
+    <div id="myTaskList" style="margin-top:12px">
+      ${myTasks.length ? myTasks.map(t=>`
+        <div class="task" style="margin-bottom:10px" data-task-id="${esc(t.taskId)}">
+          <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap">
+            <div style="flex:1;min-width:240px">
+              <div><span class="badge ${String(t.priority).toUpperCase()==='HIGH'?'bred':'borange'}">${esc(taskPriorityLabel(t.priority))}</span> <span class="badge ${['DONE','APPROVED'].includes(String(t.status).toUpperCase())?'bgreen':'borange'}">${esc(taskStatusLabel(t.status))}</span></div>
+              <h3 style="margin:8px 0 4px">${esc(t.title)}</h3>
+              ${t.description?`<p class="muted" style="margin:0 0 6px">${esc(t.description)}</p>`:''}
+              <small>Deadline: <b>${esc(t.dueDate||'Chưa đặt')}</b></small>
+            </div>
+            <div style="min-width:260px;flex:0 1 360px">
+              <label>Kết quả / cập nhật cho CEO</label>
+              <textarea class="taskResult" rows="2" ${String(t.status).toUpperCase()==='APPROVED'?'disabled':''}>${esc(t.result)}</textarea>
+              ${String(t.status).toUpperCase()==='APPROVED' ? '' : `<div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;flex-wrap:wrap">
+                <button type="button" class="ghost taskProgressBtn">Đang làm</button>
+                <button type="button" class="primary taskDoneBtn">Hoàn tất</button>
+              </div>`}
+            </div>
+          </div>
+        </div>`).join('') : '<div class="alert ok">Hiện CEO chưa giao việc nào cho bạn.</div>'}
+    </div>
+  </section>
   <div class="toolbar">
     <div class="field"><label>NGÀY BÁO CÁO</label><input value="${esc(r.date)}" readonly></div>
     <div class="field"><label>CHI NHÁNH</label><input value="${esc(session.branch)}" readonly></div>
@@ -71,6 +121,20 @@ function renderManager(r){
     </aside>
     <main id="managerPane"></main>
   </div>`;
+  $('#refreshMyTasksBtn').onclick=()=>loadManager();
+  document.querySelectorAll('[data-task-id]').forEach(row=>{
+    const taskId=row.dataset.taskId;
+    const resultEl=row.querySelector('.taskResult');
+    const saveStatus=async(status)=>{
+      try{
+        await api('task.update',{taskId,status,result:resultEl?resultEl.value:''});
+        toast(status==='DONE'?'✅ Đã báo hoàn tất công việc lên CEO':'Đã cập nhật trạng thái công việc');
+        await loadManager();
+      }catch(e){toast('❌ '+e.message)}
+    };
+    const p=row.querySelector('.taskProgressBtn'); if(p)p.onclick=()=>saveStatus('IN_PROGRESS');
+    const dn=row.querySelector('.taskDoneBtn'); if(dn)dn.onclick=()=>saveStatus('DONE');
+  });
   document.querySelectorAll('.mstep').forEach(b=>b.onclick=()=>{document.querySelectorAll('.mstep').forEach(x=>x.classList.remove('active'));b.classList.add('active');renderManagerPane(+b.dataset.i,d);$('#mgrProg').style.width=((+b.dataset.i+1)*10)+'%';$('#mgrProgTxt').textContent=(+b.dataset.i+1)+'/10 mục';});
   renderManagerPane(0,d);
 }
@@ -145,14 +209,21 @@ function renderManagerPane(i,d){
  };
 }
 
-async function loadCEO(){
+async function loadCEO(date){
+ if(date!==undefined) ceoSelectedDate=String(date||'');
  $('#ceoApp').innerHTML='<div class="card">Đang tải CEO Dashboard...</div>';
- try{ const d=await api('ceo.dashboard'); renderCEO(d); }catch(e){$('#ceoApp').innerHTML=`<div class="alert danger">${esc(e.message)}</div>`}
+ try{
+   const d=await api('ceo.dashboard',{date:ceoSelectedDate||''});
+   ceoSelectedDate=d.date||ceoSelectedDate||'';
+   renderCEO(d);
+ }catch(e){$('#ceoApp').innerHTML=`<div class="alert danger">${esc(e.message)}</div>`}
 }
 function renderCEO(d){
+ ceoManagers = Array.isArray(d.managers) ? d.managers : [];
  const k=d.kpis||{}, branches=d.branches||[], issues=d.issues||[], tasks=d.tasks||[];
  $('#ceoApp').innerHTML=`
- <div class="toolbar"><div class="field"><label>KỲ BÁO CÁO</label><input value="${esc(d.date)}" readonly></div><div class="field"><label>PHẠM VI</label><input value="Toàn hệ thống" readonly></div><div><button class="primary" id="refreshCEO">Làm mới</button></div></div>
+ <div class="toolbar"><div class="field"><label>KỲ BÁO CÁO</label><input id="ceoDateFilter" type="date" value="${esc(d.date)}" max="${esc(d.today||d.date)}"></div><div class="field"><label>PHẠM VI</label><input value="Toàn hệ thống" readonly></div><div class="ceo-date-actions"><button class="ghost" id="prevCEODate" type="button">← Ngày trước</button><button class="ghost" id="todayCEO" type="button">Hôm nay</button><button class="primary" id="refreshCEO" type="button">Xem ngày này</button></div></div>
+ ${d.date!==d.today?`<div class="alert"><b>Đang xem báo cáo cũ:</b> ${esc(d.date)}. Số liệu bên dưới là dữ liệu của ngày đã chọn, không phải hôm nay.</div>`:''}
  <div class="kpis">
   ${[['DOANH THU',money(k.revenue)],['ĐẠT TARGET',(k.targetRate||0)+'%'],['MÁY BÁN',k.machines||0],['TỶ LỆ CHỐT',(k.conversion||0)+'%'],['CHI PHÍ',money(k.cost)],['GIẢI NGÂN TREO',money(k.financePending)],['VẤN ĐỀ CEO',k.ceoIssues||0],['QL ĐÃ NỘP',`${k.submittedManagers||0}/${k.totalManagers||0}`]].map(([l,v])=>`<div class="kpi"><small>${l}</small><b>${v}</b></div>`).join('')}
  </div>
@@ -167,12 +238,19 @@ function renderCEO(d){
    <div class="card"><h2>CEO Attention</h2>${issues.filter(x=>x.requiresCEO).slice(0,4).map(x=>`<div class="task"><span class="badge bred">CẦN QUYẾT ĐỊNH</span><b style="display:block;margin-top:6px">${esc(x.title)}</b><p class="muted">${esc(x.description)}</p></div>`).join('')||'<div class="alert ok">Không có việc cần CEO quyết định.</div>'}</div>
    <div class="card"><h2>Đánh giá nhanh QL</h2><label>QL</label><select id="evalManager">${(d.managers||[]).map(m=>`<option value="${m.userId}">${esc(m.fullName)} · ${esc(m.branch)}</option>`).join('')}</select><label style="margin-top:10px">Điểm CEO</label><input id="evalScore" type="number" min="0" max="10" step="0.1"><label style="margin-top:10px">Nhận xét</label><textarea id="evalComment" rows="4"></textarea><button id="saveEval" class="dark full" style="margin-top:10px">Lưu đánh giá</button></div>
  </aside></div>`;
- $('#refreshCEO').onclick=loadCEO;
+ $('#refreshCEO').onclick=()=>loadCEO($('#ceoDateFilter').value);
+ $('#ceoDateFilter').onchange=()=>loadCEO($('#ceoDateFilter').value);
+ $('#todayCEO').onclick=()=>loadCEO(d.today||'');
+ $('#prevCEODate').onclick=()=>{
+   const base=new Date((d.date||d.today)+'T00:00:00');
+   base.setDate(base.getDate()-1);
+   loadCEO(base.toISOString().slice(0,10));
+ };
  document.querySelectorAll('.ctab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.ctab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.cpane').forEach(x=>x.classList.add('hidden'));$('#'+b.dataset.id).classList.remove('hidden')});
  document.querySelectorAll('.viewReportBtn').forEach(b=>b.onclick=()=>openReport(b.dataset.id));
  document.querySelectorAll('.createTaskFromIssue').forEach(b=>b.onclick=()=>createTaskPrompt(b.dataset.title,b.dataset.branch));
  $('#newTaskBtn').onclick=()=>createTaskPrompt('', '');
- $('#saveEval').onclick=async()=>{try{await api('evaluation.save',{managerUserId:$('#evalManager').value,score:Number($('#evalScore').value),comment:$('#evalComment').value});toast('Đã lưu đánh giá CEO');loadCEO()}catch(e){toast(e.message)}};
+ $('#saveEval').onclick=async()=>{try{await api('evaluation.save',{reportDate:d.date,managerUserId:$('#evalManager').value,score:Number($('#evalScore').value),comment:$('#evalComment').value});toast('Đã lưu đánh giá CEO');loadCEO()}catch(e){toast(e.message)}};
 }
 
 async function openReport(id){
@@ -181,11 +259,62 @@ async function openReport(id){
    alert(`BÁO CÁO ${r.branch} - ${r.reportDate}\nQL: ${r.managerName}\nDoanh thu: ${money(r.actual_revenue)}\nMáy bán: ${r.machines_sold}\nKhách đến: ${r.customer_total}\nKhách chưa mua: ${r.customer_failed}\n\nĐề xuất QL:\n${r.manager_proposal||'Không có'}`);
  }catch(e){toast(e.message)}
 }
-async function createTaskPrompt(defaultTitle, branch){
- const title=prompt('Nội dung công việc CEO giao:',defaultTitle||''); if(!title)return;
- const due=prompt('Deadline (YYYY-MM-DD HH:mm):','2026-09-03 10:00')||'';
- const desc=prompt('Yêu cầu/Kết quả mong muốn:','Cập nhật kết quả xử lý vào hệ thống.')||'';
- try{await api('task.create',{title,branch,description:desc,dueDate:due,priority:'HIGH'});toast('Đã giao việc');loadCEO()}catch(e){toast(e.message)}
+function createTaskPrompt(defaultTitle, branch){
+  if(!ceoManagers.length){
+    toast('Không có QL cửa hàng đang hoạt động để giao việc');
+    return;
+  }
+
+  const old = document.querySelector('.task-modal-backdrop');
+  if(old) old.remove();
+
+  const preferred = ceoManagers.find(m => String(m.branch||'').trim().toLowerCase() === String(branch||'').trim().toLowerCase()) || ceoManagers[0];
+  const wrap = document.createElement('div');
+  wrap.className = 'task-modal-backdrop';
+  wrap.innerHTML = `
+    <div class="task-modal">
+      <div class="task-modal-head">
+        <div><div class="brand">POPOPHONE · CEO</div><h2>Giao việc cho QL cửa hàng</h2></div>
+        <button type="button" class="ghost taskModalClose">Đóng</button>
+      </div>
+      <div class="grid2">
+        <div><label>QL NHẬN VIỆC</label><select id="taskAssignee">${ceoManagers.map(m=>`<option value="${esc(m.userId)}" ${String(m.userId)===String(preferred.userId)?'selected':''}>${esc(m.fullName)} · ${esc(m.branch)}</option>`).join('')}</select></div>
+        <div><label>ƯU TIÊN</label><select id="taskPriority"><option value="HIGH">Cao</option><option value="MEDIUM">Vừa</option><option value="LOW">Thấp</option></select></div>
+      </div>
+      <div style="margin-top:12px"><label>NỘI DUNG CÔNG VIỆC</label><input id="taskTitle" value="${esc(defaultTitle||'')}" placeholder="Ví dụ: Kiểm tra lệch phụ kiện và báo kết quả"></div>
+      <div style="margin-top:12px"><label>DEADLINE</label><input id="taskDue" type="datetime-local"></div>
+      <div style="margin-top:12px"><label>YÊU CẦU / KẾT QUẢ MONG MUỐN</label><textarea id="taskDesc" rows="4">Cập nhật kết quả xử lý vào hệ thống.</textarea></div>
+      <div class="task-modal-actions"><button type="button" class="ghost taskModalClose">Huỷ</button><button type="button" class="primary" id="taskSubmitBtn">Giao việc</button></div>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  wrap.querySelectorAll('.taskModalClose').forEach(b=>b.onclick=()=>wrap.remove());
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  const titleEl = wrap.querySelector('#taskTitle');
+  setTimeout(()=>titleEl.focus(),0);
+
+  wrap.querySelector('#taskSubmitBtn').onclick = async()=>{
+    const assignedToUserId = wrap.querySelector('#taskAssignee').value;
+    const manager = ceoManagers.find(m=>String(m.userId)===String(assignedToUserId));
+    const title = titleEl.value.trim();
+    const dueRaw = wrap.querySelector('#taskDue').value;
+    const dueDate = dueRaw ? dueRaw.replace('T',' ') : '';
+    const description = wrap.querySelector('#taskDesc').value.trim();
+    const priority = wrap.querySelector('#taskPriority').value;
+    if(!assignedToUserId){ toast('Chọn QL nhận việc'); return; }
+    if(!title){ toast('Nhập nội dung công việc'); return; }
+    const btn = wrap.querySelector('#taskSubmitBtn');
+    btn.disabled = true; btn.textContent = 'Đang giao...';
+    try{
+      await api('task.create',{assignedToUserId,branch:manager?.branch||'',title,description,dueDate,priority});
+      wrap.remove();
+      toast('Đã giao việc cho '+(manager?.fullName||'QL'));
+      loadCEO();
+    }catch(e){
+      btn.disabled=false; btn.textContent='Giao việc';
+      toast(e.message);
+    }
+  };
 }
 
 $('#loginBtn').onclick=login;

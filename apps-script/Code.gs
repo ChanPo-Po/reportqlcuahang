@@ -27,7 +27,7 @@ function doPost(e) {
       'report.getToday': () => withAuth_(body, ['MANAGER'], u => getTodayReport_(u)),
       'report.saveDraft': () => withAuth_(body, ['MANAGER'], u => saveReport_(u, body.report || {}, 'DRAFT')),
       'report.submit': () => withAuth_(body, ['MANAGER'], u => saveReport_(u, body.report || {}, 'SUBMITTED')),
-      'ceo.dashboard': () => withAuth_(body, ['CEO'], u => ceoDashboard_()),
+      'ceo.dashboard': () => withAuth_(body, ['CEO'], u => ceoDashboard_(body.date)),
       'ceo.reportDetail': () => withAuth_(body, ['CEO'], u => ceoReportDetail_(body.reportId)),
       'task.create': () => withAuth_(body, ['CEO'], u => createTask_(u, body)),
       'task.listMine': () => withAuth_(body, ['MANAGER'], u => listTasksForUser_(u)),
@@ -182,8 +182,9 @@ function validateReport_(o,status){
 }
 
 /* ---------- CEO ---------- */
-function ceoDashboard_() {
-  const date = dateKey_(new Date());
+function ceoDashboard_(requestedDate) {
+  const today = dateKey_(new Date());
+  const date = normalizeRequestedDate_(requestedDate) || today;
 
   // Lấy toàn bộ báo cáo và chuẩn hoá ngày + status ngay tại backend.
   // CEO KHÔNG phụ thuộc format ô ngày trong Google Sheet (Date / yyyy-MM-dd / dd/MM/yyyy).
@@ -277,8 +278,16 @@ function ceoDashboard_() {
     };
   });
 
+  const availableDates = [...new Set(allReports
+    .map(r => dateCellKey_(r.REPORT_DATE))
+    .filter(Boolean))]
+    .sort()
+    .reverse();
+
   return {
     date,
+    today,
+    availableDates,
     kpis: {
       revenue,
       targetRate: target ? round1_(revenue / target * 100) : 0,
@@ -295,7 +304,8 @@ function ceoDashboard_() {
     managers,
     tasks: listAllOpenTasks_(),
     debug: {
-      today: date,
+      today,
+      selectedDate: date,
       totalReportRows: allReports.length,
       todayReportRows: reports.length,
       submittedRows: submitted.length,
@@ -323,12 +333,30 @@ function ceoReportDetail_(reportId){
 /* ---------- TASK ---------- */
 function createTask_(ceo, body){
   let assignee=null;
-  const managers=rowsAsObjects_(sheet_(CFG.SHEETS.USERS)).filter(u=>String(u.ROLE)==='MANAGER'&&truthy_(u.ACTIVE));
-  if(body.assignedToUserId) assignee=managers.find(u=>String(u.USER_ID)===String(body.assignedToUserId));
-  if(!assignee && body.branch) assignee=managers.find(u=>String(u.BRANCH)===String(body.branch));
-  if(!assignee) throw new Error('Không xác định được QL nhận việc');
-  sheet_(CFG.SHEETS.TASKS).appendRow([id_('TSK'),body.title||'',body.description||'',ceo.USER_ID,assignee.USER_ID,assignee.FULL_NAME,assignee.BRANCH,body.priority||'MEDIUM',body.dueDate||'','TODO','',new Date(),new Date(),'']);
-  return {ok:true};
+  const managers=rowsAsObjects_(sheet_(CFG.SHEETS.USERS)).filter(u=>
+    String(u.ROLE||'').trim().toUpperCase()==='MANAGER' && truthy_(u.ACTIVE)
+  );
+
+  const assignedId = String(body.assignedToUserId||'').trim();
+  const branch = String(body.branch||'').trim().toLowerCase();
+
+  if(assignedId){
+    assignee=managers.find(u=>String(u.USER_ID||'').trim()===assignedId);
+  }
+  if(!assignee && branch){
+    assignee=managers.find(u=>String(u.BRANCH||'').trim().toLowerCase()===branch);
+  }
+  if(!assignee){
+    throw new Error('Không xác định được QL nhận việc. Hãy chọn QL cửa hàng trước khi giao.');
+  }
+  if(!String(body.title||'').trim()) throw new Error('Nội dung công việc không được để trống');
+
+  sheet_(CFG.SHEETS.TASKS).appendRow([
+    id_('TSK'),String(body.title||'').trim(),String(body.description||'').trim(),ceo.USER_ID,
+    assignee.USER_ID,assignee.FULL_NAME,assignee.BRANCH,body.priority||'MEDIUM',
+    body.dueDate||'','TODO','',new Date(),new Date(),''
+  ]);
+  return {ok:true,assignedToUserId:assignee.USER_ID,assignedToName:assignee.FULL_NAME,branch:assignee.BRANCH};
 }
 function listTasksForUser_(u){return rowsAsObjects_(sheet_(CFG.SHEETS.TASKS)).filter(t=>String(t.ASSIGNED_TO_USER_ID)===String(u.USER_ID));}
 function listAllOpenTasks_(){return rowsAsObjects_(sheet_(CFG.SHEETS.TASKS)).filter(t=>!['DONE','APPROVED'].includes(String(t.STATUS))).map(t=>({taskId:t.TASK_ID,title:t.TITLE,branch:t.BRANCH,assignedToName:t.ASSIGNED_TO_NAME,dueDate:t.DUE_DATE,status:t.STATUS}));}
@@ -346,7 +374,7 @@ function saveEvaluation_(ceo,body){
   const managers=rowsAsObjects_(sheet_(CFG.SHEETS.USERS));
   const m=managers.find(x=>String(x.USER_ID)===String(body.managerUserId)&&String(x.ROLE)==='MANAGER'); if(!m)throw new Error('Không tìm thấy QL');
   const score=Number(body.score); if(!(score>=0&&score<=10)) throw new Error('Điểm phải từ 0 đến 10');
-  sheet_(CFG.SHEETS.EVALS).appendRow([id_('EVA'),dateKey_(new Date()),m.USER_ID,m.FULL_NAME,m.BRANCH,ceo.USER_ID,score,body.comment||'',new Date()]);
+  sheet_(CFG.SHEETS.EVALS).appendRow([id_('EVA'),normalizeRequestedDate_(body.reportDate)||dateKey_(new Date()),m.USER_ID,m.FULL_NAME,m.BRANCH,ceo.USER_ID,score,body.comment||'',new Date()]);
   return {ok:true};
 }
 
@@ -356,6 +384,15 @@ function ensureSheet_(ss,name,headers){let sh=ss.getSheetByName(name);if(!sh)sh=
 function headers_(sh){return sh.getRange(1,1,1,sh.getLastColumn()).getDisplayValues()[0]}
 function rowsAsObjects_(sh){const lr=sh.getLastRow(),lc=sh.getLastColumn();if(lr<2)return[];const h=sh.getRange(1,1,1,lc).getDisplayValues()[0],v=sh.getRange(2,1,lr-1,lc).getValues();return v.map((r,i)=>{const o={__row:i+2};h.forEach((x,j)=>o[x]=r[j]);return o})}
 function reportObjFromRow_(r){const o={};Object.keys(r).forEach(k=>{if(k==='__row')return;o[k.toLowerCase()]=r[k]});o.status=r.STATUS;o.reportId=r.REPORT_ID;o.reportDate=r.REPORT_DATE;o.branch=r.BRANCH;o.managerName=r.MANAGER_NAME;return o}
+function normalizeRequestedDate_(v){
+  const s=String(v||'').trim();
+  if(!s) return '';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m=s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+  if(m) return m[3]+'-'+String(m[2]).padStart(2,'0')+'-'+String(m[1]).padStart(2,'0');
+  const d=new Date(s);
+  return isNaN(d.getTime())?'':dateKey_(d);
+}
 function dateKey_(d){return Utilities.formatDate(d,Session.getScriptTimeZone()||'Asia/Ho_Chi_Minh','yyyy-MM-dd')}
 function dateCellKey_(v){
   if (v instanceof Date && !isNaN(v.getTime())) return dateKey_(v);

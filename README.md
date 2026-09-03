@@ -83,3 +83,16 @@ Bản này là nền tảng chạy thật. Khi đưa vào vận hành chính th�
 3. Chỉ CEO/admin được sửa USERS.
 4. Sau khi ổn định, bổ sung log audit và reset password.
 5. Nếu muốn đăng nhập bằng Google Workspace thay username/password, thay module auth sau mà không cần đổi cấu trúc report.
+
+
+## V4 FIX CEO GIAO VIỆC LẺ
+- Nút + Giao việc mới mở popup chọn đúng QL nhận việc.
+- Gửi assignedToUserId về backend, không còn lỗi 'Không xác định được QL nhận việc'.
+- Giao việc từ issue sẽ tự chọn QL cùng chi nhánh nếu có.
+
+## V5 - CEO xem báo cáo lịch sử
+- CEO Dashboard có bộ chọn ngày.
+- Có nút Ngày trước / Hôm nay / Xem ngày này.
+- Backend `ceo.dashboard` nhận `date` và tổng hợp đúng báo cáo SUBMITTED của ngày đã chọn.
+- CEO vẫn xem được báo cáo gốc từng chi nhánh của ngày cũ.
+- Đánh giá CEO được lưu theo ngày báo cáo đang xem.
