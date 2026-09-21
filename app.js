@@ -26,7 +26,9 @@ async function api(action, data={}) {
     throw new Error(`API trả dữ liệu không phải JSON (HTTP ${res.status}). ${preview}`);
   }
   if (!res.ok) throw new Error(json.message || `API HTTP ${res.status}`);
-  if (!json.success) throw new Error(json.message || 'API error');
+  if (!json || typeof json !== 'object') throw new Error(`API ${action} trả response không hợp lệ`);
+  if (!json.success) throw new Error(json.message || `API ${action} error`);
+  if (!Object.prototype.hasOwnProperty.call(json,'data')) throw new Error(`API ${action} không trả field data. Có thể frontend đang gọi Apps Script deployment cũ.`);
   return json.data;
 }
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),2500)}
@@ -61,7 +63,8 @@ async function loadManager(){
       api('report.getToday'),
       api('task.listMine')
     ]);
-    currentReport=reportData;
+    if (!reportData || typeof reportData !== 'object') throw new Error('report.getToday trả dữ liệu rỗng/sai cấu trúc. Hãy deploy New version Apps Script và kiểm tra config.js.');
+    currentReport={date: reportData.date || '', report: (reportData.report && typeof reportData.report==='object') ? reportData.report : {status:'DRAFT'}};
     renderManager(currentReport, Array.isArray(taskRows)?taskRows:[]);
   }catch(e){$('#managerApp').innerHTML=`<div class="alert danger">${esc(e.message)}</div>`}
 }
@@ -82,7 +85,8 @@ function taskStatusLabel(s){return ({TODO:'CHƯA LÀM',IN_PROGRESS:'ĐANG LÀM',
 function taskPriorityLabel(s){return ({HIGH:'CAO',MEDIUM:'VỪA',LOW:'THẤP'})[String(s||'').toUpperCase()]||String(s||'');}
 
 function renderManager(r, taskRows=[]){
-  const d=r.report||{};
+  r = (r && typeof r === 'object') ? r : {report:{status:'DRAFT'}};
+  const d=(r.report && typeof r.report === 'object') ? r.report : {status:'DRAFT'};
   // Giá trị mặc định phải tồn tại trong object, không chỉ hiển thị trên select.
   // Nếu không, người dùng không đụng vào select thì backend sẽ tưởng là thiếu dữ liệu khi submit.
   if (d.shift == null || d.shift === '') d.shift = 'Cả ngày';
