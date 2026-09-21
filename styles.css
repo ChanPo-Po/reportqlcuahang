@@ -19,3 +19,4 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:10px 8px;
 /* CEO historical report date filter */
 .ceo-date-actions{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
 @media(max-width:760px){.ceo-date-actions{width:100%}.ceo-date-actions button{flex:1}}
+.report-modal{width:min(1050px,100%)}.report-section{border-top:1px solid var(--line);padding:14px 0}.report-section h3{margin:0 0 10px;font-size:14px}.report-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.report-grid>div{background:#f8fafc;border-radius:8px;padding:9px}.report-grid small{display:block;color:var(--muted);font-size:10px;font-weight:800}.report-grid b{display:block;margin-top:4px;font-size:12px;white-space:pre-wrap;word-break:break-word}@media(max-width:750px){.report-grid{grid-template-columns:1fr}}

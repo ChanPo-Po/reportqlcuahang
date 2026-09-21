@@ -12,8 +12,20 @@ async function api(action, data={}) {
   if (!API || API.includes('PASTE_YOUR')) throw new Error('Chưa cấu hình API_URL trong frontend/config.js');
   const payload = {action, ...data};
   if (session?.token) payload.token = session.token;
-  const res = await fetch(API,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
-  const json = await res.json();
+  let res;
+  try{
+    res = await fetch(API,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload),redirect:'follow'});
+  }catch(e){
+    throw new Error('Không kết nối được API. Kiểm tra link /exec, quyền deploy và mạng.');
+  }
+  const text = await res.text();
+  let json;
+  try{ json = JSON.parse(text); }
+  catch(e){
+    const preview=String(text||'').replace(/\s+/g,' ').slice(0,180);
+    throw new Error(`API trả dữ liệu không phải JSON (HTTP ${res.status}). ${preview}`);
+  }
+  if (!res.ok) throw new Error(json.message || `API HTTP ${res.status}`);
   if (!json.success) throw new Error(json.message || 'API error');
   return json.data;
 }
@@ -160,7 +172,7 @@ function renderManagerPane(i,d){
       <label style="margin-top:12px">Lý do khách chưa mua / dòng máy / hướng xử lý</label><textarea data-k="customer_fail_reason" rows="5">${esc(val(d,'customer_fail_reason'))}</textarea></section>`,
   2:`<section class="card"><h2>3. Doanh thu & chi phí</h2><div class="grid3">
       ${[['machines_sold','Máy bán'],['machine_revenue','Doanh thu máy'],['accessory_revenue','Phụ kiện'],['warranty_revenue','Bảo hành'],['repair_revenue','Sửa chữa'],['actual_revenue','Tổng thực tế'],['software_revenue','Doanh thu phần mềm'],['cash_amount','Tiền mặt'],['transfer_amount','Chuyển khoản'],['daily_cost','Tổng chi phí']].map(([k,l])=>`<div><label>${l}</label><input type="number" data-k="${k}" value="${esc(val(d,k,0))}"></div>`).join('')}
-      </div><label style="margin-top:12px">Chi tiết chi phí</label><textarea data-k="cost_note" rows="4">${esc(val(d,'cost_note'))}</textarea></section>`,
+      </div><label style="margin-top:12px">Lý do lệch doanh thu thực tế / phần mềm</label><textarea data-k="revenue_diff_note" rows="3">${esc(val(d,'revenue_diff_note'))}</textarea><label style="margin-top:12px">Chi tiết chi phí</label><textarea data-k="cost_note" rows="4">${esc(val(d,'cost_note'))}</textarea></section>`,
   3:`<section class="card"><h2>4. Góp & giải ngân</h2><div class="grid3">
       <div><label>Hồ sơ</label><input type="number" data-k="finance_cases" value="${esc(val(d,'finance_cases',0))}"></div>
       <div><label>Đã giải ngân</label><input type="number" data-k="finance_disbursed" value="${esc(val(d,'finance_disbursed',0))}"></div>
@@ -233,7 +245,7 @@ function renderCEO(d){
   </section>
   <section id="managers" class="cpane hidden card"><h2>Hiệu quả QL</h2><div class="table-wrap"><table><tr><th>QL</th><th>CN</th><th>Kinh doanh</th><th>Vận hành</th><th>Nhân sự</th><th>CSKH</th><th>Sửa chữa</th><th>Điểm CEO</th></tr>${(d.managers||[]).map(m=>`<tr><td>${esc(m.fullName)}</td><td>${esc(m.branch)}</td><td>${m.selfSales}</td><td>${m.selfOperation}</td><td>${m.selfStaff}</td><td>${m.selfCskh}</td><td>${m.selfRepair}</td><td>${m.ceoScore??'-'}</td></tr>`).join('')}</table></div></section>
   <section id="issues" class="cpane hidden card"><h2>Vấn đề & quyết định CEO</h2>${issues.length?issues.map(x=>`<div class="decision ${x.level==='MEDIUM'?'orangeborder':''}"><h3>${esc(x.title)}</h3><p>${esc(x.description)}</p><span class="badge ${x.requiresCEO?'bred':'bgreen'}">${x.requiresCEO?'CEO CẦN XỬ LÝ':'QL ĐANG XỬ LÝ'}</span>${x.requiresCEO?` <button class="primary createTaskFromIssue" data-title="${esc(x.title)}" data-branch="${esc(x.branch)}">Giao việc</button>`:''}</div>`).join(''):'<div class="alert ok">Không có vấn đề nổi bật.</div>'}</section>
-  <section id="tasks" class="cpane hidden card"><h2>CEO giao việc</h2><div class="table-wrap"><table><tr><th>Công việc</th><th>Chi nhánh</th><th>Người nhận</th><th>Deadline</th><th>Trạng thái</th></tr>${tasks.map(t=>`<tr><td>${esc(t.title)}</td><td>${esc(t.branch)}</td><td>${esc(t.assignedToName)}</td><td>${esc(t.dueDate)}</td><td>${esc(t.status)}</td></tr>`).join('')}</table></div><button id="newTaskBtn" class="primary" style="margin-top:12px">+ Giao việc mới</button></section>
+  <section id="tasks" class="cpane hidden card"><h2>CEO giao việc</h2><div class="table-wrap"><table><tr><th>Công việc</th><th>QL</th><th>Yêu cầu / kết quả</th><th>Deadline</th><th>Trạng thái</th><th>Xử lý</th></tr>${tasks.map(t=>`<tr><td><b>${esc(t.title)}</b><br><small>${esc(t.branch)} · ${esc(taskPriorityLabel(t.priority))}</small></td><td>${esc(t.assignedToName)}</td><td><small>${esc(t.description||'')}</small>${t.result?`<div class="alert ok"><b>Kết quả QL:</b> ${esc(t.result)}</div>`:''}</td><td>${esc(t.dueDate||'')}</td><td>${esc(taskStatusLabel(t.status))}</td><td>${String(t.status).toUpperCase()==='DONE'?`<button class="primary approveTaskBtn" data-id="${esc(t.taskId)}">Duyệt</button> <button class="ghost returnTaskBtn" data-id="${esc(t.taskId)}">Làm lại</button>`:'-'}</td></tr>`).join('')}</table></div><button id="newTaskBtn" class="primary" style="margin-top:12px">+ Giao việc mới</button></section>
  </main><aside class="side">
    <div class="card"><h2>CEO Attention</h2>${issues.filter(x=>x.requiresCEO).slice(0,4).map(x=>`<div class="task"><span class="badge bred">CẦN QUYẾT ĐỊNH</span><b style="display:block;margin-top:6px">${esc(x.title)}</b><p class="muted">${esc(x.description)}</p></div>`).join('')||'<div class="alert ok">Không có việc cần CEO quyết định.</div>'}</div>
    <div class="card"><h2>Đánh giá nhanh QL</h2><label>QL</label><select id="evalManager">${(d.managers||[]).map(m=>`<option value="${m.userId}">${esc(m.fullName)} · ${esc(m.branch)}</option>`).join('')}</select><label style="margin-top:10px">Điểm CEO</label><input id="evalScore" type="number" min="0" max="10" step="0.1"><label style="margin-top:10px">Nhận xét</label><textarea id="evalComment" rows="4"></textarea><button id="saveEval" class="dark full" style="margin-top:10px">Lưu đánh giá</button></div>
@@ -250,13 +262,31 @@ function renderCEO(d){
  document.querySelectorAll('.viewReportBtn').forEach(b=>b.onclick=()=>openReport(b.dataset.id));
  document.querySelectorAll('.createTaskFromIssue').forEach(b=>b.onclick=()=>createTaskPrompt(b.dataset.title,b.dataset.branch));
  $('#newTaskBtn').onclick=()=>createTaskPrompt('', '');
- $('#saveEval').onclick=async()=>{try{await api('evaluation.save',{reportDate:d.date,managerUserId:$('#evalManager').value,score:Number($('#evalScore').value),comment:$('#evalComment').value});toast('Đã lưu đánh giá CEO');loadCEO()}catch(e){toast(e.message)}};
+ document.querySelectorAll('.approveTaskBtn').forEach(b=>b.onclick=async()=>{try{await api('task.update',{taskId:b.dataset.id,status:'APPROVED'});toast('Đã duyệt công việc');loadCEO(d.date)}catch(e){toast(e.message)}});
+ document.querySelectorAll('.returnTaskBtn').forEach(b=>b.onclick=async()=>{try{await api('task.update',{taskId:b.dataset.id,status:'IN_PROGRESS'});toast('Đã trả việc cho QL xử lý tiếp');loadCEO(d.date)}catch(e){toast(e.message)}});
+ $('#saveEval').onclick=async()=>{try{await api('evaluation.save',{reportDate:d.date,managerUserId:$('#evalManager').value,score:Number($('#evalScore').value),comment:$('#evalComment').value});toast('Đã lưu đánh giá CEO');loadCEO(d.date)}catch(e){toast(e.message)}};
 }
 
 async function openReport(id){
  try{
    const r=await api('ceo.reportDetail',{reportId:id});
-   alert(`BÁO CÁO ${r.branch} - ${r.reportDate}\nQL: ${r.managerName}\nDoanh thu: ${money(r.actual_revenue)}\nMáy bán: ${r.machines_sold}\nKhách đến: ${r.customer_total}\nKhách chưa mua: ${r.customer_failed}\n\nĐề xuất QL:\n${r.manager_proposal||'Không có'}`);
+   const old=document.querySelector('.report-modal-backdrop'); if(old)old.remove();
+   const sections=[
+    ['Vận hành',[['Ca làm','shift'],['Vệ sinh','cleaning_done'],['Họp đầu giờ','meeting_done'],['Kiểm phụ kiện','accessory_check'],['Chương trình','promotion'],['Ghi chú','operation_note']]],
+    ['Khách hàng',[['Khách đến','customer_total'],['Có nhu cầu','customer_intent'],['Đã mua','customer_bought'],['Chưa mua','customer_failed'],['Có thể follow','customer_follow'],['Lý do chưa mua','customer_fail_reason']]],
+    ['Doanh thu & chi phí',[['Máy bán','machines_sold'],['Doanh thu máy','machine_revenue'],['Phụ kiện','accessory_revenue'],['Bảo hành','warranty_revenue'],['Sửa chữa','repair_revenue'],['Tổng thực tế','actual_revenue'],['Phần mềm','software_revenue'],['Lý do lệch','revenue_diff_note'],['Tiền mặt','cash_amount'],['Chuyển khoản','transfer_amount'],['Chi phí','daily_cost'],['Chi tiết chi phí','cost_note']]],
+    ['Giải ngân',[['Hồ sơ','finance_cases'],['Đã giải ngân','finance_disbursed'],['Chờ giải ngân','finance_pending'],['Chi tiết follow','finance_note']]],
+    ['Nhân sự',[['Dự kiến','staff_plan'],['Có mặt','staff_present'],['Vắng/trễ','staff_issue_count'],['Chi tiết','staff_issue_note'],['Nội dung họp','meeting_note'],['Tinh thần','staff_morale']]],
+    ['Kho & phụ kiện',[['Phát sinh','inventory_issue'],['Ghi chú','inventory_note']]],
+    ['Sửa chữa & CSKH',[['Nhận sửa','repair_intake'],['Hoàn tất','repair_completed'],['Chưa trả','repair_not_returned'],['Quá hẹn','repair_overdue'],['Feedback xấu','negative_feedback'],['Đã xử lý','complaint_resolved'],['Ghi chú','repair_cskh_note']]],
+    ['Marketing',[['Clip review','review_clips'],['Clip daily','daily_clips'],['Ảnh cửa hàng','store_photos'],['Ghi chú','marketing_note']]],
+    ['Sự cố & đánh giá',[['Sự cố khẩn','urgent_issue'],['Lỗi quy trình','process_issue'],['Nhân sự','score_staff'],['Kinh doanh','score_sales'],['CSKH','score_cskh'],['Sửa chữa','score_repair'],['Vận hành','score_operation']]],
+    ['Kế hoạch ngày mai',[['Ưu tiên','tomorrow_priorities'],['Target máy','target_machines'],['Target doanh thu','target_revenue'],['Target follow','target_follow'],['Đề xuất CEO','manager_proposal']]]
+   ];
+   const moneyKeys=new Set(['machine_revenue','accessory_revenue','warranty_revenue','repair_revenue','actual_revenue','software_revenue','cash_amount','transfer_amount','daily_cost','finance_disbursed','finance_pending','target_revenue']);
+   const wrap=document.createElement('div'); wrap.className='task-modal-backdrop report-modal-backdrop';
+   wrap.innerHTML=`<div class="task-modal report-modal"><div class="task-modal-head"><div><div class="brand">BÁO CÁO GỐC QL</div><h2>${esc(r.branch)} · ${esc(r.reportDate)}</h2><p class="muted">${esc(r.managerName)} · ${esc(r.status)} · phiên bản ${esc(r.report_version||1)}</p></div><button class="ghost reportClose">Đóng</button></div>${sections.map(([title,items])=>`<section class="report-section"><h3>${esc(title)}</h3><div class="report-grid">${items.map(([label,key])=>`<div><small>${esc(label)}</small><b>${moneyKeys.has(key)?money(r[key]):esc(r[key]??'-')}</b></div>`).join('')}</div></section>`).join('')}</div>`;
+   document.body.appendChild(wrap); wrap.querySelector('.reportClose').onclick=()=>wrap.remove(); wrap.onclick=e=>{if(e.target===wrap)wrap.remove()};
  }catch(e){toast(e.message)}
 }
 function createTaskPrompt(defaultTitle, branch){
@@ -309,7 +339,7 @@ function createTaskPrompt(defaultTitle, branch){
       await api('task.create',{assignedToUserId,branch:manager?.branch||'',title,description,dueDate,priority});
       wrap.remove();
       toast('Đã giao việc cho '+(manager?.fullName||'QL'));
-      loadCEO();
+      loadCEO(ceoSelectedDate||'');
     }catch(e){
       btn.disabled=false; btn.textContent='Giao việc';
       toast(e.message);

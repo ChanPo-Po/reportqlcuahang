@@ -48,10 +48,10 @@ function setupSystem() {
     'USER_ID','USERNAME','PASSWORD_HASH','SALT','FULL_NAME','ROLE','BRANCH','ACTIVE','CREATED_AT'
   ]);
   ensureSheet_(ss, CFG.SHEETS.REPORTS, [
-    'REPORT_ID','REPORT_DATE','BRANCH','MANAGER_USER_ID','MANAGER_NAME','STATUS','UPDATED_AT','SUBMITTED_AT',
+    'REPORT_ID','REPORT_DATE','BRANCH','MANAGER_USER_ID','MANAGER_NAME','STATUS','UPDATED_AT','SUBMITTED_AT','LAST_EDIT_AT','REPORT_VERSION',
     'SHIFT','CLEANING_DONE','MEETING_DONE','ACCESSORY_CHECK','PROMOTION','OPERATION_NOTE',
     'CUSTOMER_TOTAL','CUSTOMER_INTENT','CUSTOMER_BOUGHT','CUSTOMER_FAILED','CUSTOMER_FOLLOW','CHECKIN','CUSTOMER_FAIL_REASON',
-    'MACHINES_SOLD','MACHINE_REVENUE','ACCESSORY_REVENUE','WARRANTY_REVENUE','REPAIR_REVENUE','ACTUAL_REVENUE','SOFTWARE_REVENUE','CASH_AMOUNT','TRANSFER_AMOUNT','DAILY_COST','COST_NOTE',
+    'MACHINES_SOLD','MACHINE_REVENUE','ACCESSORY_REVENUE','WARRANTY_REVENUE','REPAIR_REVENUE','ACTUAL_REVENUE','SOFTWARE_REVENUE','REVENUE_DIFF_NOTE','CASH_AMOUNT','TRANSFER_AMOUNT','DAILY_COST','COST_NOTE',
     'FINANCE_CASES','FINANCE_DISBURSED','FINANCE_PENDING','FINANCE_NOTE',
     'STAFF_PLAN','STAFF_PRESENT','STAFF_ISSUE_COUNT','STAFF_ISSUE_NOTE','MEETING_NOTE','STAFF_MORALE',
     'INVENTORY_ISSUE','INVENTORY_NOTE',
@@ -64,7 +64,7 @@ function setupSystem() {
     'TASK_ID','TITLE','DESCRIPTION','ASSIGNED_BY_USER_ID','ASSIGNED_TO_USER_ID','ASSIGNED_TO_NAME','BRANCH','PRIORITY','DUE_DATE','STATUS','RESULT','CREATED_AT','UPDATED_AT','COMPLETED_AT'
   ]);
   ensureSheet_(ss, CFG.SHEETS.EVALS, [
-    'EVAL_ID','REPORT_DATE','MANAGER_USER_ID','MANAGER_NAME','BRANCH','CEO_USER_ID','SCORE','COMMENT','CREATED_AT'
+    'EVAL_ID','REPORT_DATE','MANAGER_USER_ID','MANAGER_NAME','BRANCH','CEO_USER_ID','SCORE','COMMENT','CREATED_AT','UPDATED_AT'
   ]);
   return 'OK - system sheets created';
 }
@@ -91,15 +91,18 @@ function login_(body) {
   if (!u || hashPassword_(password, String(u.SALT)) !== String(u.PASSWORD_HASH)) throw new Error('Sai tài khoản hoặc mật khẩu');
   const token = Utilities.getUuid()+Utilities.getUuid();
   const exp = Date.now() + CFG.SESSION_HOURS*3600*1000;
-  CacheService.getScriptCache().put('sess:'+token, JSON.stringify({userId:u.USER_ID,exp}), CFG.SESSION_HOURS*3600);
+  // ScriptCache chỉ cho TTL tối đa khoảng 6 giờ; dùng ScriptProperties để phiên 12h không lỗi login.
+  PropertiesService.getScriptProperties().setProperty('sess:'+token, JSON.stringify({userId:u.USER_ID,exp}));
   return {...publicUser_(u), token, expiresAt:exp};
 }
 function withAuth_(body, roles, fn) {
   const token = String(body.token||'');
-  const raw = CacheService.getScriptCache().get('sess:'+token);
+  if (!token) throw new Error('Phiên đăng nhập hết hạn');
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty('sess:'+token);
   if (!raw) throw new Error('Phiên đăng nhập hết hạn');
   const s = JSON.parse(raw);
-  if (Date.now() > s.exp) throw new Error('Phiên đăng nhập hết hạn');
+  if (Date.now() > Number(s.exp||0)) { props.deleteProperty('sess:'+token); throw new Error('Phiên đăng nhập hết hạn'); }
   const u = rowsAsObjects_(sheet_(CFG.SHEETS.USERS)).find(x => String(x.USER_ID)===String(s.userId) && truthy_(x.ACTIVE));
   if (!u) throw new Error('Tài khoản không còn hiệu lực');
   if (roles && !roles.includes(String(u.ROLE))) throw new Error('Bạn không có quyền truy cập chức năng này');
@@ -115,13 +118,13 @@ function hashPassword_(password,salt){
 function getTodayReport_(u) {
   const date = dateKey_(new Date());
   const rows = rowsAsObjects_(sheet_(CFG.SHEETS.REPORTS));
-  const r = rows.find(x => dateCellKey_(x.REPORT_DATE)===date && String(x.BRANCH).trim()===String(u.BRANCH).trim() && String(x.MANAGER_USER_ID).trim()===String(u.USER_ID).trim());
+  const r = rows.find(x => dateCellKey_(x.REPORT_DATE)===date && same_(x.BRANCH,u.BRANCH));
   return {date, report:r ? reportObjFromRow_(r) : {status:'DRAFT'}};
 }
 function saveReport_(u, report, requestedStatus) {
   const sh=sheet_(CFG.SHEETS.REPORTS), headers=headers_(sh), date=dateKey_(new Date());
   const rows=rowsAsObjects_(sh);
-  let existing=rows.find(x=>dateCellKey_(x.REPORT_DATE)===date && String(x.BRANCH).trim()===String(u.BRANCH).trim() && String(x.MANAGER_USER_ID).trim()===String(u.USER_ID).trim());
+  let existing=rows.find(x=>dateCellKey_(x.REPORT_DATE)===date && same_(x.BRANCH,u.BRANCH));
 
   // QUY TẮC TRẠNG THÁI:
   // 1) Bấm Nộp => SUBMITTED tuyệt đối.
@@ -137,6 +140,8 @@ function saveReport_(u, report, requestedStatus) {
     REPORT_DATE: date, BRANCH:u.BRANCH, MANAGER_USER_ID:u.USER_ID, MANAGER_NAME:u.FULL_NAME,
     STATUS:status,
     UPDATED_AT:now,
+    LAST_EDIT_AT: existing ? now : '',
+    REPORT_VERSION: existing ? Number(existing.REPORT_VERSION||1)+1 : 1,
     SUBMITTED_AT: status==='SUBMITTED'
       ? (existingStatus==='SUBMITTED' && existing && existing.SUBMITTED_AT ? existing.SUBMITTED_AT : now)
       : ''
@@ -145,7 +150,7 @@ function saveReport_(u, report, requestedStatus) {
   // KHÔNG cho report.status/report_id/... ghi đè metadata do backend quyết định.
   const RESERVED = new Set([
     'REPORT_ID','REPORT_DATE','BRANCH','MANAGER_USER_ID','MANAGER_NAME',
-    'STATUS','UPDATED_AT','SUBMITTED_AT'
+    'STATUS','UPDATED_AT','SUBMITTED_AT','LAST_EDIT_AT','REPORT_VERSION'
   ]);
   headers.forEach(h=>{
     if (RESERVED.has(h)) return;
@@ -175,12 +180,24 @@ function validateReport_(o,status){
   const required=['SHIFT','MEETING_DONE','CUSTOMER_TOTAL','CUSTOMER_BOUGHT','MACHINES_SOLD','ACTUAL_REVENUE','SOFTWARE_REVENUE','DAILY_COST','STAFF_PRESENT','TOMORROW_PRIORITIES'];
   const missing=required.filter(k=>o[k]===undefined || o[k]==='');
   if(missing.length) throw new Error('Chưa đủ dữ liệu bắt buộc: '+missing.join(', '));
-  const diff=Number(o.ACTUAL_REVENUE||0)-Number(o.SOFTWARE_REVENUE||0);
-  if(Math.abs(diff)>1 && !String(o.COST_NOTE||'').trim()) throw new Error('Doanh thu thực tế và phần mềm đang lệch. Cần ghi rõ nguyên nhân/xử lý.');
-  if(Number(o.CUSTOMER_FAILED||0)>0 && !String(o.CUSTOMER_FAIL_REASON||'').trim()) throw new Error('Có khách chưa mua: bắt buộc nhập lý do và hướng xử lý.');
-  if(Number(o.FINANCE_PENDING||0)>0 && !String(o.FINANCE_NOTE||'').trim()) throw new Error('Có giải ngân treo: bắt buộc nhập chi tiết follow.');
+  const n=k=>Number(o[k]||0);
+  const nonNegative=['CUSTOMER_TOTAL','CUSTOMER_INTENT','CUSTOMER_BOUGHT','CUSTOMER_FAILED','CUSTOMER_FOLLOW','MACHINES_SOLD','MACHINE_REVENUE','ACCESSORY_REVENUE','WARRANTY_REVENUE','REPAIR_REVENUE','ACTUAL_REVENUE','SOFTWARE_REVENUE','CASH_AMOUNT','TRANSFER_AMOUNT','DAILY_COST','FINANCE_CASES','FINANCE_DISBURSED','FINANCE_PENDING','STAFF_PLAN','STAFF_PRESENT'];
+  const bad=nonNegative.filter(k=>n(k)<0);
+  if(bad.length) throw new Error('Số liệu không được âm: '+bad.join(', '));
+  if(n('CUSTOMER_INTENT')>n('CUSTOMER_TOTAL')) throw new Error('Khách có nhu cầu không thể lớn hơn tổng khách đến.');
+  if(n('CUSTOMER_BOUGHT')>n('CUSTOMER_INTENT')) throw new Error('Khách đã mua không thể lớn hơn khách có nhu cầu.');
+  if(n('CUSTOMER_FAILED')>n('CUSTOMER_INTENT')) throw new Error('Khách chưa mua không thể lớn hơn khách có nhu cầu.');
+  if(n('CUSTOMER_BOUGHT')+n('CUSTOMER_FAILED')>n('CUSTOMER_INTENT')) throw new Error('Khách đã mua + chưa mua đang lớn hơn số khách có nhu cầu.');
+  if(n('STAFF_PLAN')>0 && n('STAFF_PRESENT')>n('STAFF_PLAN')) throw new Error('Nhân sự có mặt không thể lớn hơn nhân sự dự kiến.');
+  const diff=n('ACTUAL_REVENUE')-n('SOFTWARE_REVENUE');
+  if(Math.abs(diff)>1 && !String(o.REVENUE_DIFF_NOTE||'').trim()) throw new Error('Doanh thu thực tế và phần mềm đang lệch. Cần nhập lý do lệch doanh thu.');
+  const payment=n('CASH_AMOUNT')+n('TRANSFER_AMOUNT');
+  if(n('ACTUAL_REVENUE')>0 && Math.abs(payment-n('ACTUAL_REVENUE'))>1) throw new Error('Tiền mặt + chuyển khoản phải khớp tổng doanh thu thực tế.');
+  const components=n('MACHINE_REVENUE')+n('ACCESSORY_REVENUE')+n('WARRANTY_REVENUE')+n('REPAIR_REVENUE');
+  if(n('ACTUAL_REVENUE')>0 && Math.abs(components-n('ACTUAL_REVENUE'))>1) throw new Error('Doanh thu máy + phụ kiện + bảo hành + sửa chữa phải khớp tổng doanh thu thực tế.');
+  if(n('CUSTOMER_FAILED')>0 && !String(o.CUSTOMER_FAIL_REASON||'').trim()) throw new Error('Có khách chưa mua: bắt buộc nhập lý do và hướng xử lý.');
+  if(n('FINANCE_PENDING')>0 && !String(o.FINANCE_NOTE||'').trim()) throw new Error('Có giải ngân treo: bắt buộc nhập chi tiết follow.');
 }
-
 /* ---------- CEO ---------- */
 function ceoDashboard_(requestedDate) {
   const today = dateKey_(new Date());
@@ -203,18 +220,16 @@ function ceoDashboard_(requestedDate) {
   const branchMap = new Map();
 
   users.forEach(u => {
-    const uid = String(u.USER_ID || '').trim();
-    const r = reports.find(x => String(x.MANAGER_USER_ID || '').trim() === uid);
-    branchMap.set(uid || ('USER-' + String(u.BRANCH || '')), { user:u, report:r || null });
+    const key=String(u.BRANCH||'').trim().toLowerCase() || String(u.USER_ID||'').trim();
+    const r = reports.find(x => same_(x.BRANCH,u.BRANCH));
+    if(!branchMap.has(key) || r) branchMap.set(key, { user:u, report:r || null });
   });
 
   reports.forEach(r => {
-    const uid = String(r.MANAGER_USER_ID || '').trim();
-    const already = [...branchMap.values()].some(x =>
-      x.report && String(x.report.REPORT_ID || '') === String(r.REPORT_ID || '')
-    );
+    const key=String(r.BRANCH||'').trim().toLowerCase() || ('REPORT-' + String(r.REPORT_ID || ''));
+    const already = branchMap.has(key) && branchMap.get(key).report;
     if (!already) {
-      branchMap.set(uid || ('REPORT-' + String(r.REPORT_ID || '')), {
+      branchMap.set(key, {
         user: {
           USER_ID: r.MANAGER_USER_ID || '',
           FULL_NAME: r.MANAGER_NAME || 'QL cửa hàng',
@@ -296,13 +311,13 @@ function ceoDashboard_(requestedDate) {
       cost: sum_(submitted, 'DAILY_COST'),
       financePending: sum_(submitted, 'FINANCE_PENDING'),
       ceoIssues: issues.filter(x => x.requiresCEO).length,
-      submittedManagers: submitted.length,
-      totalManagers: Math.max(users.length, branches.length)
+      submittedManagers: new Set(submitted.map(r=>String(r.BRANCH||'').trim().toLowerCase())).size,
+      totalManagers: branches.length
     },
     branches,
     issues,
     managers,
-    tasks: listAllOpenTasks_(),
+    tasks: listTasksForCEO_(date),
     debug: {
       today,
       selectedDate: date,
@@ -350,37 +365,62 @@ function createTask_(ceo, body){
     throw new Error('Không xác định được QL nhận việc. Hãy chọn QL cửa hàng trước khi giao.');
   }
   if(!String(body.title||'').trim()) throw new Error('Nội dung công việc không được để trống');
+  const priority=String(body.priority||'MEDIUM').trim().toUpperCase();
+  if(!['LOW','MEDIUM','HIGH'].includes(priority)) throw new Error('Mức ưu tiên không hợp lệ');
 
   sheet_(CFG.SHEETS.TASKS).appendRow([
     id_('TSK'),String(body.title||'').trim(),String(body.description||'').trim(),ceo.USER_ID,
-    assignee.USER_ID,assignee.FULL_NAME,assignee.BRANCH,body.priority||'MEDIUM',
+    assignee.USER_ID,assignee.FULL_NAME,assignee.BRANCH,priority,
     body.dueDate||'','TODO','',new Date(),new Date(),''
   ]);
   return {ok:true,assignedToUserId:assignee.USER_ID,assignedToName:assignee.FULL_NAME,branch:assignee.BRANCH};
 }
-function listTasksForUser_(u){return rowsAsObjects_(sheet_(CFG.SHEETS.TASKS)).filter(t=>String(t.ASSIGNED_TO_USER_ID)===String(u.USER_ID));}
-function listAllOpenTasks_(){return rowsAsObjects_(sheet_(CFG.SHEETS.TASKS)).filter(t=>!['DONE','APPROVED'].includes(String(t.STATUS))).map(t=>({taskId:t.TASK_ID,title:t.TITLE,branch:t.BRANCH,assignedToName:t.ASSIGNED_TO_NAME,dueDate:t.DUE_DATE,status:t.STATUS}));}
+function listTasksForUser_(u){
+  return rowsAsObjects_(sheet_(CFG.SHEETS.TASKS))
+    .filter(t=>String(t.ASSIGNED_TO_USER_ID)===String(u.USER_ID))
+    .sort((a,b)=>new Date(b.UPDATED_AT||b.CREATED_AT||0)-new Date(a.UPDATED_AT||a.CREATED_AT||0));
+}
+function listTasksForCEO_(date){
+  const today=dateKey_(new Date());
+  return rowsAsObjects_(sheet_(CFG.SHEETS.TASKS))
+    .filter(t=>{const st=String(t.STATUS||'TODO').toUpperCase(); const touched=dateCellKey_(t.CREATED_AT)===date || dateCellKey_(t.UPDATED_AT)===date || dateCellKey_(t.COMPLETED_AT)===date; return !date || (date===today ? (!['APPROVED'].includes(st) || touched) : touched);})
+    .map(t=>({taskId:t.TASK_ID,title:t.TITLE,description:t.DESCRIPTION,branch:t.BRANCH,assignedToName:t.ASSIGNED_TO_NAME,priority:t.PRIORITY,dueDate:t.DUE_DATE,status:String(t.STATUS||'TODO').toUpperCase(),result:t.RESULT||'',createdAt:t.CREATED_AT,updatedAt:t.UPDATED_AT,completedAt:t.COMPLETED_AT}))
+    .sort((a,b)=>String(a.status)==='DONE'?-1:String(b.status)==='DONE'?1:0);
+}
 function updateTask_(u,body){
   const sh=sheet_(CFG.SHEETS.TASKS),headers=headers_(sh),rows=rowsAsObjects_(sh);
   const t=rows.find(x=>String(x.TASK_ID)===String(body.taskId)); if(!t)throw new Error('Task not found');
-  if(String(u.ROLE)==='MANAGER' && String(t.ASSIGNED_TO_USER_ID)!==String(u.USER_ID)) throw new Error('Không có quyền sửa task này');
-  const patch={STATUS:body.status||t.STATUS,RESULT:body.result!==undefined?body.result:t.RESULT,UPDATED_AT:new Date()};
-  if(['DONE','APPROVED'].includes(String(patch.STATUS))) patch.COMPLETED_AT=new Date();
-  const vals=headers.map(h=>patch[h]!==undefined?patch[h]:t[h]); sh.getRange(Number(t.__row),1,1,headers.length).setValues([vals]); return {ok:true};
+  const role=String(u.ROLE||'').toUpperCase();
+  if(role==='MANAGER' && String(t.ASSIGNED_TO_USER_ID)!==String(u.USER_ID)) throw new Error('Không có quyền sửa task này');
+  const allowed=['TODO','IN_PROGRESS','DONE','APPROVED'];
+  const next=String(body.status||t.STATUS||'TODO').toUpperCase();
+  if(!allowed.includes(next)) throw new Error('Trạng thái công việc không hợp lệ');
+  if(role==='MANAGER' && next==='APPROVED') throw new Error('Chỉ CEO được duyệt công việc');
+  if(role==='CEO' && next==='DONE') throw new Error('CEO chỉ duyệt DONE thành APPROVED hoặc trả lại IN_PROGRESS');
+  if(role==='CEO' && next==='APPROVED' && String(t.STATUS||'').toUpperCase()!=='DONE') throw new Error('Chỉ duyệt được công việc QL đã báo hoàn tất');
+  if(role==='MANAGER' && next==='DONE' && !String(body.result!==undefined?body.result:t.RESULT||'').trim()) throw new Error('Cần nhập kết quả xử lý trước khi báo hoàn tất');
+  const patch={STATUS:next,RESULT:body.result!==undefined?String(body.result):t.RESULT,UPDATED_AT:new Date()};
+  if(next==='DONE' || next==='APPROVED') patch.COMPLETED_AT=new Date();
+  if(next==='TODO' || next==='IN_PROGRESS') patch.COMPLETED_AT='';
+  const vals=headers.map(h=>patch[h]!==undefined?patch[h]:t[h]); sh.getRange(Number(t.__row),1,1,headers.length).setValues([vals]); return {ok:true,status:next};
 }
-
 /* ---------- EVALUATION ---------- */
 function saveEvaluation_(ceo,body){
   const managers=rowsAsObjects_(sheet_(CFG.SHEETS.USERS));
-  const m=managers.find(x=>String(x.USER_ID)===String(body.managerUserId)&&String(x.ROLE)==='MANAGER'); if(!m)throw new Error('Không tìm thấy QL');
+  const m=managers.find(x=>String(x.USER_ID)===String(body.managerUserId)&&String(x.ROLE).toUpperCase()==='MANAGER'); if(!m)throw new Error('Không tìm thấy QL');
   const score=Number(body.score); if(!(score>=0&&score<=10)) throw new Error('Điểm phải từ 0 đến 10');
-  sheet_(CFG.SHEETS.EVALS).appendRow([id_('EVA'),normalizeRequestedDate_(body.reportDate)||dateKey_(new Date()),m.USER_ID,m.FULL_NAME,m.BRANCH,ceo.USER_ID,score,body.comment||'',new Date()]);
+  const date=normalizeRequestedDate_(body.reportDate)||dateKey_(new Date());
+  const sh=sheet_(CFG.SHEETS.EVALS), h=headers_(sh), rows=rowsAsObjects_(sh);
+  const old=rows.find(x=>dateCellKey_(x.REPORT_DATE)===date && String(x.MANAGER_USER_ID)===String(m.USER_ID));
+  const now=new Date();
+  const obj={EVAL_ID:old?old.EVAL_ID:id_('EVA'),REPORT_DATE:date,MANAGER_USER_ID:m.USER_ID,MANAGER_NAME:m.FULL_NAME,BRANCH:m.BRANCH,CEO_USER_ID:ceo.USER_ID,SCORE:score,COMMENT:body.comment||'',CREATED_AT:old?old.CREATED_AT:now,UPDATED_AT:now};
+  if(old) sh.getRange(Number(old.__row),1,1,h.length).setValues([h.map(k=>obj[k]!==undefined?obj[k]:old[k])]);
+  else sh.appendRow(h.map(k=>obj[k]!==undefined?obj[k]:''));
   return {ok:true};
 }
-
 /* ---------- HELPERS ---------- */
 function sheet_(name){return SpreadsheetApp.openById(CFG.SPREADSHEET_ID).getSheetByName(name) || (()=>{throw new Error('Missing sheet '+name)})();}
-function ensureSheet_(ss,name,headers){let sh=ss.getSheetByName(name);if(!sh)sh=ss.insertSheet(name);if(sh.getLastRow()===0)sh.getRange(1,1,1,headers.length).setValues([headers]).setFontWeight('bold');return sh}
+function ensureSheet_(ss,name,headers){let sh=ss.getSheetByName(name);if(!sh)sh=ss.insertSheet(name);if(sh.getLastRow()===0){sh.getRange(1,1,1,headers.length).setValues([headers]).setFontWeight('bold');return sh;}const current=sh.getRange(1,1,1,sh.getLastColumn()).getDisplayValues()[0];const missing=headers.filter(h=>!current.includes(h));if(missing.length)sh.getRange(1,current.length+1,1,missing.length).setValues([missing]).setFontWeight('bold');return sh}
 function headers_(sh){return sh.getRange(1,1,1,sh.getLastColumn()).getDisplayValues()[0]}
 function rowsAsObjects_(sh){const lr=sh.getLastRow(),lc=sh.getLastColumn();if(lr<2)return[];const h=sh.getRange(1,1,1,lc).getDisplayValues()[0],v=sh.getRange(2,1,lr-1,lc).getValues();return v.map((r,i)=>{const o={__row:i+2};h.forEach((x,j)=>o[x]=r[j]);return o})}
 function reportObjFromRow_(r){const o={};Object.keys(r).forEach(k=>{if(k==='__row')return;o[k.toLowerCase()]=r[k]});o.status=r.STATUS;o.reportId=r.REPORT_ID;o.reportDate=r.REPORT_DATE;o.branch=r.BRANCH;o.managerName=r.MANAGER_NAME;return o}
@@ -411,6 +451,7 @@ function dateCellKey_(v){
   const d = new Date(s);
   return isNaN(d.getTime()) ? s : dateKey_(d);
 }
+function same_(a,b){return String(a||'').trim().toLowerCase()===String(b||'').trim().toLowerCase()}
 function id_(p){return p+'-'+Utilities.getUuid().split('-')[0].toUpperCase()}
 function sum_(rows,key){return rows.reduce((s,r)=>s+Number(r[key]||0),0)}
 function round1_(n){return Math.round(Number(n)*10)/10}
